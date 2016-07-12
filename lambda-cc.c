@@ -269,6 +269,7 @@ static char * lcc_compiler_from_argv(int *pargc, char ***pargv) {
 }
 
 int main(int argc, char **argv) {
+    int compile_only = 0;
     argc--;
     argv++;
 
@@ -363,34 +364,54 @@ int main(int argc, char **argv) {
             continue;
         if (!lcc_string_appendf(&args_before, "%s ", argv[i]))
             goto args_oom;
+        if (!strcmp(argv[i], "-c")) compile_only = 1;
     }
     /* Trim the trailing whitespace */
     if (args_before.used >= 2)
         args_before.buffer[args_before.used - 2] = '\0';
    
     /* Handle anythng after the -o */
-    stop += 2; /* skip -o and <output> */
+//    stop += 2; /* skip -o and <output> */
     size_t count = argc;
-    if (stop != count) {
-        for (size_t i = stop; i < count; i++) {
-            if (i == source.index) continue;
-            if (!lcc_string_appendf(&args_after, "%s ", argv[i]))
-                goto args_oom;
-        }
+    for (size_t i = stop; i < count; i++) {
+        if (i == source.index) continue;
+        if (!lcc_string_appendf(&args_after, "%s ", argv[i]))
+            goto args_oom;
+        if (!strcmp(argv[i], "-c")) compile_only = 1;
     }
-    /* Trim trailing whitespace */
-    if (args_after.used >= 2)
-        args_after.buffer[args_after.used - 2] = '\0';
 
     /* Build the shell call */
     lcc_string_t shell;
     if (!lcc_string_init(&shell))
         goto args_oom;
 
+    char *srcdir = strdup(source.file);
+    char *dirsep = strrchr(srcdir, '/');
+    if (dirsep) {
+        *dirsep = 0;
+        lcc_string_appendf(&args_after, "-I%s ", srcdir);
+    }
+    free(srcdir);
+
+    /* Trim trailing whitespace */
+    if (args_after.used >= 2)
+        args_after.buffer[args_after.used - 2] = '\0';
+
     const char *lang = source.cpp ? "c++" : "c";
+#if 0
     if (!lcc_string_appendf(&shell, "%s %s | %s -x%s %s - -o %s %s",
         lambdapp, source.file, cc, lang, args_before.buffer, output.output, args_after.buffer))
             goto shell_oom;
+#else
+    // FIXME: .o extension depends on the platform
+    if (compile_only && output.aout) {
+        if (!lcc_string_appendf(&shell, "%s %s | %s -x%s %s %s -o %s.o -",
+            lambdapp, source.file, cc, lang, args_before.buffer, args_after.buffer, source.file))
+            goto shell_oom;
+    } else if (!lcc_string_appendf(&shell, "%s %s | %s -x%s %s %s -",
+        lambdapp, source.file, cc, lang, args_before.buffer, args_after.buffer))
+            goto shell_oom;
+#endif
 
     int attempt = 0;
 #ifndef _NDEBUG
