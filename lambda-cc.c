@@ -268,6 +268,25 @@ static char * lcc_compiler_from_argv(int *pargc, char ***pargv) {
     return strdup(argv[0]);
 }
 
+static char *cmd_sanitize(const char *cmd) {
+    char *sane;
+    int cnt = 0, i, k;
+
+    for (i = 0; cmd[i]; i++)
+         if (cmd[i] == '"') cnt++;
+
+    if (!cnt) return strdup(cmd);
+
+    sane = malloc(i + cnt + 1);
+    for (i = 0, k = 0; cmd[i]; i++) {
+         if (cmd[i] == '"')
+             sane[k++] = '\\';
+         sane[k++] = cmd[i];
+    }
+    sane[k] = 0;
+    return sane;
+}
+
 int main(int argc, char **argv) {
     int compile_only = 0;
     argc--;
@@ -413,18 +432,21 @@ int main(int argc, char **argv) {
             goto shell_oom;
 #endif
 
+    char *sanecmd = cmd_sanitize(shell.buffer);
+
     int attempt = 0;
 #ifndef _NDEBUG
     /* Call the shell */
-    attempt = system(shell.buffer);
+    attempt = system(sanecmd);
 #else
-    printf("%s\n", shell.buffer);
+    printf("%s\n", sanecmd);
 #endif
 
     lcc_string_destroy(&shell);
     lcc_string_destroy(&args_before);
     lcc_string_destroy(&args_after);
     free(lambdapp);
+    free(sanecmd);
 
     return attempt;
 
