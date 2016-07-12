@@ -6,6 +6,7 @@
 
 #include <sys/types.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 #define PP_ARRAY_COUNT(ARRAY) \
     (sizeof((ARRAY))/sizeof(*(ARRAY)))
@@ -13,7 +14,7 @@
     for (size_t NAME = 0; NAME < PP_ARRAY_COUNT(ARRAY); NAME++)
 
 static void lcc_usage(const char *app) {
-    fprintf(stderr, "%s usage: [cc options]\n", app);
+    fprintf(stderr, "%s usage: [--lambda-pp=<path/to/lambda-pp>] <cc to use> [cc options]\n", app);
 }
 
 static void lcc_error(const char *message,  ...) {
@@ -84,20 +85,31 @@ static void lcc_string_destroy(lcc_string_t *string) {
     free(string->buffer);
 }
 
-static const char *lcc_lambdapp_find(void) {
+static char *lcc_lambdapp_find(void) {
     char *search;
     if ((search = getenv("LAMBDA_PP")))
-        return search;
+        return strdup(search);
 
-    static const char *bins[] = {
-        ".", /* Try reliative to ourselfs as well */
-        "/bin",
-        "/usr/bin",
-        
-        /* When lambdapp is included as a submodule in a project */
-        "lambdapp"
-    };
+    const char *PATHS = getenv("PATH");
+    char *paths = strdup(PATHS ? PATHS : ".:/bin:/usr/bin:lambdapp");
+    char *lambdapp = NULL;
+    char *tok = NULL;
 
+    while ((tok = strtok(tok ? NULL : paths, ":")) != NULL) {
+        char path[PATH_MAX];
+        struct stat st;
+
+        snprintf(path, PATH_MAX - 1, "%s/lambda-pp", tok);
+        if (stat(path, &st) != 0) continue;
+        if ((st.st_mode & S_IXUSR) == 0) continue;
+        lambdapp = strdup(path);
+        break;
+    }
+
+    free(paths);
+    return lambdapp;
+
+#if 0
     PP_ARRAY_FOR(bin, bins) {
         DIR *dir = opendir(bins[bin]);
         if (!dir)
@@ -116,8 +128,10 @@ static const char *lcc_lambdapp_find(void) {
         closedir(dir);
     }
     return NULL;
+#endif
 }
 
+#if 0
 static const char *lcc_compiler_find(void) {
     /* Try enviroment variables first */
     char *search;
@@ -159,14 +173,17 @@ static const char *lcc_compiler_find(void) {
 
     return NULL;
 }
+#endif
 
 static bool lcc_source_find(int argc, char **argv, lcc_source_t *source) {
     static const char *exts[] = {
         /* C file extensions */
         ".c",
+        ".C",
 
         /* C++ file extensions */
         ".cc", ".cx", ".cxx", ".cpp",
+        ".CC", ".CX", ".CXX", ".CPP",
     };
 
     for (int i = 0; i < argc; i++) {
@@ -206,24 +223,96 @@ static bool lcc_output_find(int argc, char **argv, lcc_output_t *output) {
     return false;
 }
 
+static char * lcc_compiler_from_argv(int *pargc, char ***pargv) {
+    // This is quite crappy! configure seems to break up "strings like this"
+    // into multiple args when doing CC="lambda-pp 'ccache clang'"
+    // Only supports ", no ', nor \' , nor \"
+
+      char *cc = NULL;
+    int argc = *pargc;
+    char **argv = *pargv;
+
+    if (!argc || !argv[0]) return NULL;
+    if ((argv[0][0] == '"') || (argv[0][0] == '\'')) {
+        const char delim = argv[0][0];
+        int end = 0;
+        int len = strlen(argv[0]);
+        char *last = NULL;
+
+        for (int i = 1; i < argc; i++) {
+            len += strlen(argv[i]);
+            if (strchr(argv[i], delim)) {
+                end = i;
+                last = strdup(argv[i]);
+                break;
+            }
+        }
+        if (!end) return NULL;
+
+        cc = calloc(len + 1, 1);
+        *(strchr(last, delim)) = '\0';
+        strcpy(cc, argv[0] + 1);
+        strcat(cc, " ");
+        for (int i = 1; i < end; i++) {
+            strcat(cc, argv[i]);
+            strcat(cc, " ");
+        }
+        strcat(cc, last);
+
+        free(last);
+        *pargc -= end;
+        *pargv += end;
+        return cc;
+    }
+
+    return strdup(argv[0]);
+}
+
 int main(int argc, char **argv) {
     argc--;
     argv++;
 
-    if (!argc) {
+    if (argc < 2) {
         lcc_usage(argv[-1]);
         return 1;
     }
 
-    const char *cc = lcc_compiler_find();
-    if (!cc) {
-        lcc_error("Couldn't find a compiler");
-        return 1;
+    char *lambdapp = NULL;
+
+    if (!strncmp("--lambda-pp", argv[0], sizeof("--lambda-pp") - 1)) {
+        if (argv[0][sizeof("--lambda-pp")] != '=') {
+            lambdapp = strdup(argv[1]);
+            argv += 2;
+            argc -= 2;
+        } else {
+            lambdapp = strdup(argv[0] + sizeof("--lambda-pp"));
+            argv++;
+            argc--;
+        }
+    } else {
+        lambdapp = lcc_lambdapp_find();
     }
 
-    const char *lambdapp = lcc_lambdapp_find();
+    if (argc < 1) {
+        lcc_usage(argv[-1]);
+        goto args_fail;
+    }
+
     if (!lambdapp) {
         lcc_error("Couldn't find lambda-pp");
+        goto args_fail;
+    }
+
+    char *cc = lcc_compiler_from_argv(&argc, &argv);
+    if (!cc) {
+        lcc_error("Couldn't find a compiler");
+        goto args_fail;
+    }
+
+    argv++;
+    argc--;
+    if (argc < 1) {
+        lcc_usage(argv[-1]);
         return 1;
     }
 
@@ -239,7 +328,7 @@ int main(int argc, char **argv) {
         lcc_string_destroy(&args_before);
         return 1;
     }
-    
+
     /* Find the source file */
     lcc_source_t source;
     if (!lcc_source_find(argc, argv, &source)) {
@@ -278,12 +367,13 @@ int main(int argc, char **argv) {
     /* Trim the trailing whitespace */
     if (args_before.used >= 2)
         args_before.buffer[args_before.used - 2] = '\0';
-    
+   
     /* Handle anythng after the -o */
     stop += 2; /* skip -o and <output> */
     size_t count = argc;
     if (stop != count) {
         for (size_t i = stop; i < count; i++) {
+            if (i == source.index) continue;
             if (!lcc_string_appendf(&args_after, "%s ", argv[i]))
                 goto args_oom;
         }
@@ -298,7 +388,7 @@ int main(int argc, char **argv) {
         goto args_oom;
 
     const char *lang = source.cpp ? "c++" : "c";
-    if (!lcc_string_appendf(&shell, "%s/lambda-pp %s | %s -x%s %s - -o %s %s",
+    if (!lcc_string_appendf(&shell, "%s %s | %s -x%s %s - -o %s %s",
         lambdapp, source.file, cc, lang, args_before.buffer, output.output, args_after.buffer))
             goto shell_oom;
 
@@ -313,6 +403,7 @@ int main(int argc, char **argv) {
     lcc_string_destroy(&shell);
     lcc_string_destroy(&args_before);
     lcc_string_destroy(&args_after);
+    free(lambdapp);
 
     return attempt;
 
@@ -322,5 +413,7 @@ args_oom:
     lcc_error("Out of memory");
     lcc_string_destroy(&args_before);
     lcc_string_destroy(&args_after);
+args_fail:
+    free(lambdapp);
     return 1;
 }

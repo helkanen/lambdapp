@@ -1,11 +1,11 @@
 DESTDIR :=
-PREFIX  := /usr/local
+PREFIX  := /opt/e
 BINDIR  := $(PREFIX)/bin
 DATADIR := $(PREFIX)/share
 MANDIR  := $(DATADIR)/man
 
 CC ?= clang
-CFLAGS = -std=c11 -D_BSD_SOURCE -Wall -Wextra -pedantic -O2
+CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -pedantic -O2
 LDFLAGS =
 PP_SOURCES = lambda-pp.c
 PP_OBJECTS = lambda-pp.o
