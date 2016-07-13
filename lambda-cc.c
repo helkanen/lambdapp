@@ -424,11 +424,11 @@ int main(int argc, char **argv) {
 #else
     // FIXME: .o extension depends on the platform
     if (compile_only && output.aout) {
-        if (!lcc_string_appendf(&shell, "%s %s | %s -x%s %s %s -o %s.o -",
-            lambdapp, source.file, cc, lang, args_before.buffer, args_after.buffer, source.file))
+        if (!lcc_string_appendf(&shell, "%s %s | %s -x%s %s %s -o %s.o -x%s -",
+            lambdapp, source.file, cc, args_before.buffer, args_after.buffer, source.file, lang))
             goto shell_oom;
-    } else if (!lcc_string_appendf(&shell, "%s %s | %s -x%s %s %s -",
-        lambdapp, source.file, cc, lang, args_before.buffer, args_after.buffer))
+    } else if (!lcc_string_appendf(&shell, "%s %s | %s %s %s -x%s -",
+        lambdapp, source.file, cc, args_before.buffer, args_after.buffer, lang))
             goto shell_oom;
 #endif
 
@@ -442,13 +442,19 @@ int main(int argc, char **argv) {
     printf("%s\n", sanecmd);
 #endif
 
+    if (getenv("LAMBDA_PP_DEBUG")) {
+        FILE *f = fopen(getenv("LAMBDA_PP_DEBUG"), "a");
+        fprintf(f, "%d - %s\n", attempt, sanecmd);
+        fclose(f);
+    }
+
     lcc_string_destroy(&shell);
     lcc_string_destroy(&args_before);
     lcc_string_destroy(&args_after);
     free(lambdapp);
     free(sanecmd);
 
-    return attempt;
+    return attempt == 256 ? -1 : 0;
 
 shell_oom:
     lcc_string_destroy(&shell);
