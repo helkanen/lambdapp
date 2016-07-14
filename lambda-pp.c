@@ -43,11 +43,13 @@ typedef struct {
 
 typedef struct {
     size_t pos;
-    size_t line;
+    size_t markline;
+    char  *markfile;
 } lambda_position_t;
 
 typedef struct {
-    const char *file;
+    const char *parse_file;
+    char       *file;
     char       *data;
     size_t      length;
     size_t      line;
@@ -55,9 +57,11 @@ typedef struct {
     size_t      keylength;
     bool        short_enabled;
     bool        success;
+    bool        after_cpp; /* -x mode: lambda-pp is run after standard cpp */
 } lambda_source_t;
 
 typedef struct {
+    char          *decl_file;
     size_t         start;
     lambda_range_t decl;
     lambda_range_t body;
@@ -128,11 +132,12 @@ static inline bool lambda_vector_create_lambda(lambda_vector_t *vec, size_t *idx
     return true;
 }
 
-static inline bool lambda_vector_push_position(lambda_vector_t *vec, size_t pos, size_t line) {
+static inline bool lambda_vector_push_position(lambda_vector_t *vec, size_t pos, size_t line, const char *file) {
     if (!lambda_vector_resize(vec))
         return false;
-    vec->positions[vec->elements].pos  = pos;
-    vec->positions[vec->elements].line = line;
+    vec->positions[vec->elements].pos = pos;
+    vec->positions[vec->elements].markline = line;
+    vec->positions[vec->elements].markfile = strdup(file);
     vec->elements++;
     return true;
 }
@@ -201,6 +206,7 @@ parse_open_failed:
 }
 
 static inline void parse_close(lambda_source_t *source) {
+    free(source->file);
     free(source->data);
 }
 
@@ -274,6 +280,7 @@ static size_t parse(lambda_source_t *source, parse_data_t *data, size_t i, parse
         i = parse_skip_white(source, i);
         l->decl.begin = i;
         l->decl_line = source->line;
+        l->decl_file = strdup(source->file);
         size_t ofs = 0;
         if ((i = parse(source, data, i, PARSE_TYPE, &ofs)) == ERROR)
             goto parse_error;
@@ -302,7 +309,7 @@ static size_t parse(lambda_source_t *source, parse_data_t *data, size_t i, parse
                     continue;
                 }
                 protomove = false;
-                if (!lambda_vector_push_position(&data->positions, protopos, source->line))
+                if (!lambda_vector_push_position(&data->positions, protopos, source->line, source->file))
                     goto parse_oom;
             }
 
@@ -314,8 +321,21 @@ static size_t parse(lambda_source_t *source, parse_data_t *data, size_t i, parse
                 protopos  = i;
                 continue;
             }
-
             if (source->data[i] == '#') {
+                if (source->after_cpp) {
+                    char orig_file[4096];
+                    int orig_line, a, b, c, d;
+                    if (sscanf(&source->data[i], "# %d %s %d %d %d %d", &orig_line, orig_file, &a, &b, &c, &d) >= 2) {
+                        free(source->file);
+                        source->file = strdup(orig_file);
+                        source->line = orig_line - 1;
+                        do i++; while (source->data[i] && (source->data[i] != '\n'));
+                        protomove = true;
+                        protopos  = j = i;
+                        preprocessor = false;
+                        continue;
+                    }
+                }
                 if (!nameofs && (i = parse_word(source, data, j, i)) == ERROR)
                     goto parse_error;
                 j = ++i;
@@ -330,6 +350,19 @@ static size_t parse(lambda_source_t *source, parse_data_t *data, size_t i, parse
                 j = ++i;
                 protomove = true;
                 protopos  = i;
+                preprocessor = false;
+                continue;
+            }
+        } else if (mark && source->after_cpp && source->data[i] == '#') {
+            char orig_file[4096];
+            int orig_line, a, b, c, d;
+            if (sscanf(&source->data[i], "# %d %s %d %d %d %d", &orig_line, orig_file, &a, &b, &c, &d) >= 2) {
+                free(source->file);
+                source->file = strdup(orig_file);
+                source->line = orig_line - 1;
+                do i++; while (source->data[i] && (source->data[i] != '\n'));
+                protomove = true;
+                protopos  = j = i;
                 preprocessor = false;
                 continue;
             }
@@ -434,11 +467,16 @@ finish_lambda:
 
 /* Generator */
 static inline void generate_marker(FILE *out, const char *file, size_t line, bool newline) {
-    fprintf(out, "%s#line %zu \"%s\"\n", newline ? "\n" : "", line, file);
+    // old style: #line 42 "source.c"
+    //fprintf(out, "%s#line %zu \"%s\"\n", newline ? "\n" : "", line, file);
+    if (file[0] == '"')
+        fprintf(out, "%s# %zu %s\n", newline ? "\n" : "", line, file);
+    else
+        fprintf(out, "%s# %zu \"%s\"\n", newline ? "\n" : "", line, file);
 }
 
 static inline void generate_begin(FILE *out, lambda_source_t *source, lambda_vector_t *lambdas, size_t idx) {
-    generate_marker(out, source->file, lambdas->funcs[idx].decl_line, true);
+    generate_marker(out, lambdas->funcs[idx].decl_file, lambdas->funcs[idx].decl_line, true);
     fprintf(out, "static ");
     size_t ofs = lambdas->funcs[idx].name_offset;
     fwrite(source->data + lambdas->funcs[idx].decl.begin, ofs, 1, out);
@@ -472,6 +510,7 @@ static void generate_functions(FILE *out, lambda_source_t *source, parse_data_t 
         generate_code(out, source, lambda->body.begin, lambda->body.length + 1, data, lam + 1, true);
         if (lambda->is_short)
             fprintf(out, "}");
+        free(lambda->decl_file);
     }
     fprintf(out, "\n");
 }
@@ -489,7 +528,8 @@ static void generate_code(FILE *out, lambda_source_t *source, size_t pos, size_t
                 size_t length = point - pos;
                 fwrite(source->data + pos, length, 1, out);
                 generate_functions(out, source, data, lam, proto);
-                generate_marker(out, source->file, lambdapos->line, true);
+                generate_marker(out, lambdapos->markfile, lambdapos->markline, true);
+                free(lambdapos->markfile);
                 len -= length;
                 pos += length;
             }
@@ -548,7 +588,8 @@ static void usage(const char *prog, FILE *out) {
         "  -k, --keyword=WORD  change the lambda keyword to WORD\n"
         "  -o, --output=FILE   write to FILE instead of stdout\n"
         "  -s                  enable shortened syntax (default)\n"
-        "  -S                  disable shortened syntax\n");
+        "  -S                  disable shortened syntax\n"
+        "  -x                  input is GCC's CPP output\n");
 }
 
 static void version(FILE *out) {
@@ -635,6 +676,10 @@ int main(int argc, char **argv) {
           source.short_enabled = false;
           continue;
         }
+        if (!strcmp(argv[i], "-x")) {
+          source.after_cpp= true;
+          continue;
+        }
         if (isparam(argc, argv, &i, 'k', "keyword", &argarg)) {
             if (i < 0)
                 return 1;
@@ -667,7 +712,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    source.file = file ? file : "<stdin>";
+    source.parse_file = file ? file : "<stdin>";
+    source.file = strdup(file);
     if (!parse_open(&source, file ? fopen(file, "r") : stdin)) {
         fprintf(stderr, "failed to open file %s %s\n", source.file, strerror(errno));
         return 1;
