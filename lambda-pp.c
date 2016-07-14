@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <unistd.h>
 
 #define isalpha(a) ((((unsigned)(a)|32)-'a') < 26)
 #define isdigit(a) (((unsigned)(a)-'0') < 10)
@@ -53,6 +54,7 @@ typedef struct {
     const char *keyword;
     size_t      keylength;
     bool        short_enabled;
+    bool        success;
 } lambda_source_t;
 
 typedef struct {
@@ -148,6 +150,7 @@ static void parse_error(lambda_source_t *source, const char *message, ...) {
     va_start(va, message);
     vsnprintf(buffer, sizeof(buffer), message, va);
     va_end(va);
+    source->success = false;
     fprintf(stderr, "%s:%zu error: %s\n", source->file, source->line, buffer);
     fflush(stderr);
 }
@@ -411,6 +414,7 @@ static size_t parse(lambda_source_t *source, parse_data_t *data, size_t i, parse
     }
 
     lambda_vector_destroy(&parens);
+    source->success = true;
     return i;
 
 parse_oom:
@@ -512,14 +516,14 @@ static void generate_code(FILE *out, lambda_source_t *source, size_t pos, size_t
 }
 
 
-static void generate(FILE *out, lambda_source_t *source) {
+static bool generate(FILE *out, lambda_source_t *source) {
     parse_data_t data;
     lambda_vector_init(&data.lambdas,   sizeof(data.lambdas.funcs[0]));
     lambda_vector_init(&data.positions, sizeof(data.positions.positions[0]));
     if (parse(source, &data, 0, PARSE_NORMAL, false) == ERROR) {
         lambda_vector_destroy(&data.lambdas);
         lambda_vector_destroy(&data.positions);
-        return;
+        return false;
     }
 
     generate_marker(out, source->file, 1, false);
@@ -531,6 +535,8 @@ static void generate(FILE *out, lambda_source_t *source) {
 
     lambda_vector_destroy(&data.lambdas);
     lambda_vector_destroy(&data.positions);
+
+    return source->success;
 }
 
 static void usage(const char *prog, FILE *out) {
@@ -601,6 +607,7 @@ int main(int argc, char **argv) {
     const char *file = NULL;
     const char *output = NULL;
     FILE       *outfile = stdout;
+    bool        success;
 
     lambda_source_init(&source);
 
@@ -675,9 +682,11 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    generate(outfile, &source);
-    if (outfile != stdout)
-      fclose(outfile);
+    success = generate(outfile, &source);
+    if (outfile != stdout) {
+        fclose(outfile);
+        if (!success) unlink(output);
+    }
     parse_close(&source);
 
     return 0;
